@@ -15,16 +15,19 @@ from __future__ import annotations
 
 import time
 
+import numpy as np
+
 from ..config import (
-    ENABLE_QUESTION_INDEX,
+    EMBED_DIM,
     ENABLE_SELF_QUERY,
     KNN_INNER_HITS_SIZE,
     KNN_K,
     RERANKER_ENABLED,
     SELF_QUERY_MIN_RESULTS,
 )
-from ..embed import build_chunk_embeddings, build_question_embeddings, embed_texts
-from ..videos import load_videos
+from ..embed import embed_texts
+from ..ingest.chunk import chunk_one, load_chunks
+from ..ingest.youtube_fetch import fetch_transcript, extract_video_id
 from .qdrant_store import QdrantHybridStore
 from .query_breakdown import decompose
 from .rerank import Reranker
@@ -33,11 +36,12 @@ from .self_query import analyze as self_query_analyze, build_filter
 
 class SelfBuiltEngine:
     def __init__(self):
-        vecs, chunks = build_chunk_embeddings()
-        self.chunks = chunks
-        self.video_labels = {v["id"]: v.get("content_labels", []) for v in load_videos()}
-        question_vecs = build_question_embeddings(chunks) if ENABLE_QUESTION_INDEX else {}
-        self.store = QdrantHybridStore(vecs, chunks, question_vecs=question_vecs)
+        # The live demo is session-scoped: bundled course chunks stay on disk,
+        # but the Qdrant collection starts empty on every server boot.
+        self.chunks: list[dict] = []
+        self.video_labels: dict[str, list[str]] = {}
+        empty_vecs = np.empty((0, EMBED_DIM), dtype=np.float32)
+        self.store = QdrantHybridStore(empty_vecs, self.chunks)
         self.reranker = Reranker()
 
     # -- pipeline stages (each independently callable for the demo trace) -----
@@ -114,6 +118,22 @@ class SelfBuiltEngine:
                 "hypothetical_questions": c.get("hypothetical_questions", []),
             })
         return out
+
+    def add_video(self, url: str, video_meta: dict) -> list[dict]:
+        """Dynamically ingest a YouTube video into the live index.
+
+        Fetches the transcript, chunks it, embeds it, upserts into Qdrant,
+        and updates the in-memory chunks list and video_labels map.
+        Returns the new chunks so the caller can generate sample questions.
+        """
+        video_id = extract_video_id(url)
+        fetch_transcript(url)
+        chunk_one(video_id, force=True)
+        new_chunks = load_chunks(video_id)
+        vecs = embed_texts([c["text"] for c in new_chunks])
+        self.store.add_chunks(new_chunks, vecs)
+        self.video_labels[video_id] = video_meta.get("content_labels", [])
+        return new_chunks
 
     def search(
         self,

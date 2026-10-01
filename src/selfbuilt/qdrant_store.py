@@ -91,6 +91,9 @@ class QdrantHybridStore:
             vectors_config=vectors_config,
             sparse_vectors_config={SPARSE: models.SparseVectorParams(modifier=models.Modifier.IDF)},
         )
+        if not chunks:
+            return
+
         # Video-level content labels propagated to each chunk for specialty filtering.
         video_labels = {v["id"]: v.get("content_labels", []) for v in load_videos()}
         sparse_docs = self._sparse.embed([_sparse_doc(c) for c in chunks])
@@ -120,6 +123,43 @@ class QdrantHybridStore:
                 },
             ))
         self.client.upsert(self.collection, points)
+
+    # -- add (dynamic ingest) ----------------------------------------------
+
+    def add_chunks(self, new_chunks: list[dict], vecs: np.ndarray) -> int:
+        """Upsert new chunks into the live collection.
+
+        IDs start at len(existing chunks) so they never collide.
+        Returns the starting index of the newly added chunks.
+        """
+        offset = len(self.chunks)
+        sparse_docs = self._sparse.embed([_sparse_doc(c) for c in new_chunks])
+        points = []
+        for i, (c, sp) in enumerate(zip(new_chunks, sparse_docs)):
+            global_idx = offset + i
+            vec = {
+                DENSE: vecs[i].tolist(),
+                SPARSE: models.SparseVector(indices=sp.indices.tolist(), values=sp.values.tolist()),
+            }
+            if self.has_questions:
+                # No HyDE questions for dynamically ingested chunks — fall back to text vec.
+                vec[QUESTIONS] = [vecs[i].tolist()]
+            points.append(models.PointStruct(
+                id=global_idx,
+                vector=vec,
+                payload={
+                    "idx": global_idx,
+                    "chunk_id": c["chunk_id"],
+                    "video_id": c["video_id"],
+                    "start_ms": c["start_ms"],
+                    "end_ms": c["end_ms"],
+                    "text": c["text"],
+                    "content_labels": [],
+                },
+            ))
+        self.client.upsert(self.collection, points)
+        self.chunks.extend(new_chunks)
+        return offset
 
     # -- query -------------------------------------------------------------
 

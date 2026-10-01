@@ -1,0 +1,9 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+
+# Generated ingestion and embedding artifacts.
+data/transcripts/*.json
+data/chunks/*.json
+data/embeddings/*

@@ -1,114 +1,170 @@
-# Moment RAG — cited answers with the exact source moment
+# Moment RAG
 
-A small, runnable RAG app that answers a **complex question** across a set of long podcast
-episodes and returns a **streamed, cited answer** — where every citation deep-links into the
-source **YouTube** video at the exact moment, with a synced transcript.
+Moment RAG is a session-scoped video research studio. Add one or more YouTube
+videos, ask questions across their captions, and jump from every citation to the
+exact moment in the source video.
 
-It's the agentic-RAG ideas from this module made tangible on **video**: the intelligence is on
-the *query* side (decompose → hybrid retrieve → re-rank), and retrieval resolves to **moments**,
-not just documents — which is what you actually cite in a generated answer.
+The app starts with an empty live index. Only videos added after the server starts
+are searchable in that server session, so bundled course data does not leak into
+answers or suggested questions.
 
-> Companion to the notebooks in this module. Where `001. Agentic Router.ipynb` routes a query
-> to a backend, this shows the next step: **decompose** one query into facets, retrieve across
-> **three fused signals**, **re-rank** to the precise moment, and **stream** a grounded answer.
+## What it demonstrates
 
----
+- YouTube caption ingestion with timestamps
+- Semantic transcript chunking
+- OpenAI dense embeddings
+- In-memory Qdrant hybrid retrieval (dense vectors and BM25 sparse vectors)
+- Query decomposition and metadata-aware self-query
+- Reciprocal Rank Fusion (RRF) and cross-encoder reranking
+- Streamed answers with timestamped citations
+- Video-aware suggested questions generated from the current session
+- Side-by-side comparison with a simple dense-retrieval baseline
 
-## What it does
+## Run locally
 
-- **Ask anything complex.** "Where do these guests most disagree about AI's moat?" — not just keyword lookup.
-- **Streamed, cited answer.** Markdown answer with inline `[n]` citations, written as it generates.
-- **Click a citation → the moment plays.** A YouTube popup opens the real episode at that timestamp; the transcript scrolls and highlights in sync.
-- **See how it was built.** A collapsible trace shows the inferred filters, the sub-questions, the candidate count, and timings.
+Requirements:
 
-No video downloads, no ffmpeg — playback uses the YouTube IFrame player. The corpus is 10
-episodes of *Lenny's Podcast* (product / growth / AI / leadership).
+- Python 3.10 or newer
+- An OpenAI API key
+- YouTube videos with captions enabled
 
----
+From the repository root:
+
+```bash
+cd modules/Module_3_Production_Agentic_RAG_AI_Systems/Moment_RAG
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+Add your key to `.env`:
+
+```dotenv
+OPENAI_API_KEY=your_openai_api_key
+```
+
+Start the app:
+
+```bash
+uvicorn app:app --port 8000
+```
+
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000), add a YouTube URL, wait for
+ingestion to complete, and ask a question.
+
+Do not use Uvicorn's `--reload` option for a normal demo. Reloading restarts the
+process and clears the session-scoped video list and in-memory Qdrant index.
+
+The first ingestion or query can take longer while FastEmbed downloads its local
+semantic chunking, sparse retrieval, and reranker models.
 
 ## How it works
 
+### Ingestion
+
+1. The UI sends up to 10 YouTube URLs to `/ingest/batch`.
+2. `youtube-transcript-api` fetches each video's captions and timestamps.
+3. The transcript is converted into timed words and semantic chunks.
+4. OpenAI creates a dense embedding for every chunk.
+5. Qdrant indexes dense vectors, BM25 sparse vectors, and optional generated
+   question vectors.
+6. The app generates three suggested questions from the newly added videos.
+
+The batch endpoint streams progress events for transcript download, chunking,
+embedding, and indexing, which drive the status pills in the UI.
+
+### Retrieval and answer generation
+
+1. The question is checked by a lightweight input guardrail.
+2. A self-query step infers useful metadata filters.
+3. Complex questions are decomposed into focused sub-queries.
+4. Each sub-query runs dense, BM25, and generated-question retrieval branches.
+5. Reciprocal Rank Fusion combines the ranked result lists.
+6. A cross-encoder reranks the strongest candidates.
+7. The answer model streams a cited response from the retrieved moments.
+8. Clicking a citation seeks the embedded YouTube player to its exact timestamp.
+
+### Baseline comparison
+
+After an answer is generated, **Compare pipelines** runs the same question through:
+
+- **Baseline RAG:** one dense query over chunks from the current session.
+- **Moment RAG:** self-query, decomposition, hybrid retrieval, RRF, reranking, and
+  cited synthesis.
+
+The comparison is tied to the current question. Typing or selecting a new question
+clears the old comparison until **Compare pipelines** is clicked again.
+
+## Session and data behavior
+
+- `QDRANT_LOCATION=:memory:` is the default.
+- The live Qdrant collection and `/videos` list start empty on every server boot.
+- Only videos added in the current process are included in search, comparison, and
+  question suggestions.
+- Restarting the server clears the live session index.
+- Downloaded transcripts and generated chunks are still written to
+  `data/transcripts/` and `data/chunks/` as local processing artifacts. They are
+  not automatically loaded on the next boot.
+
+This separation keeps demos reproducible: local artifacts can help with debugging,
+but the searchable corpus always reflects what the user added in the current
+session.
+
+## Configuration
+
+Copy `.env.example` to `.env`. The main settings are:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | — | Required for embeddings and LLM calls |
+| `EMBED_MODEL` | `text-embedding-3-large` | Dense embedding model |
+| `EMBED_DIM` | `1024` | Dense vector dimensions |
+| `LLM_MODEL` | `gpt-4o-mini` | Query analysis, metadata, and suggestions |
+| `SYNTH_MODEL` | `gpt-4o` | User-facing cited answer |
+| `QDRANT_LOCATION` | `:memory:` | Qdrant storage location |
+| `QDRANT_COLLECTION` | `moment_rag_chunks` | Qdrant collection name |
+| `RERANKER_ENABLED` | `true` | Enables cross-encoder reranking |
+| `RERANKER_MODEL` | `jinaai/jina-reranker-v1-tiny-en` | FastEmbed reranker |
+| `SEMANTIC_CHUNKING` | `true` | Enables embedding-based chunk boundaries |
+| `APP_USER` / `APP_PASSWORD` | unset | Optional HTTP Basic Authentication |
+
+Use matching values for `EMBED_MODEL` and `EMBED_DIM`. If you intentionally point
+`QDRANT_LOCATION` at persistent storage, the application still creates a fresh
+collection at startup to preserve session-only behavior.
+
+## Project structure
+
+```text
+Moment_RAG/
+├── app.py                   # FastAPI routes, streaming, ingestion, comparison
+├── studio_ui.html           # Single-page research studio
+├── requirements.txt
+├── data/
+│   ├── transcripts/         # Generated timed transcripts
+│   └── chunks/              # Generated semantic chunks
+└── src/
+    ├── baseline_rag.py      # Simple current-session comparison pipeline
+    ├── embed.py             # OpenAI embedding client
+    ├── ingest/
+    │   ├── youtube_fetch.py # Caption download and timestamp conversion
+    │   ├── chunk.py         # Transcript-to-chunk pipeline
+    │   ├── semantic.py      # Semantic boundary detection
+    │   └── metadata.py      # Chunk metadata enrichment
+    └── selfbuilt/
+        ├── search.py        # Moment RAG orchestration
+        ├── qdrant_store.py  # Dense, sparse, and question-vector retrieval
+        ├── query_breakdown.py
+        ├── self_query.py
+        └── rerank.py
 ```
-                         User question
-                              │
-              ┌───────────────▼────────────────┐
-              │  Self-query  (LLM → filters)    │  infer hard metadata filters (topic)
-              └───────────────┬────────────────┘
-              ┌───────────────▼────────────────┐
-              │  Decompose   (LLM → sub-queries)│  one question → 2–4 facets
-              └───────────────┬────────────────┘
-                              ▼
-        ┌──────────── Hybrid retrieval in Qdrant ────────────┐
-        │  dense kNN  ·  BM25 sparse  ·  HyDE question vecs   │  three branches per sub-query
-        │                fused with RRF                       │
-        └───────────────┬────────────────────────────────────┘
-              ┌──────────▼───────────┐
-              │  Cross-encoder re-rank│  sharpen *which* chunk → which moment
-              └──────────┬───────────┘
-              ┌──────────▼───────────┐
-              │  Cited synthesis      │  streamed markdown with [n] → moments
-              └──────────────────────┘
-```
 
-**HyDE lives at ingestion, not query time.** Each chunk is pre-tagged with the questions it
-answers; those questions are embedded as a third (multi-vector) retrieval branch, so a user's
-question can match a stored *question* — not just the raw text. This keeps query latency low.
+## Troubleshooting
 
-### Key components
-
-| File | Role |
-|---|---|
-| `app.py` | FastAPI server. `/ask_stream` (SSE: trace → citations → streamed answer), `/transcript/{id}`, `/videos`, `/` |
-| `studio_ui.html` | Single-file UI: streaming answer, citation pills, YouTube popup + synced transcript, trace widget |
-| `src/selfbuilt/search.py` | The pipeline orchestrator (`SelfBuiltEngine`) — each stage is independently callable |
-| `src/selfbuilt/qdrant_store.py` | Qdrant hybrid index: dense + BM25 sparse + question multi-vector, RRF-fused server-side |
-| `src/selfbuilt/query_breakdown.py` | LLM query decomposition into sub-queries |
-| `src/selfbuilt/self_query.py` | LLM infers metadata filters from the query (cross-topic disambiguation) |
-| `src/selfbuilt/rerank.py` | Cross-encoder (fastembed ONNX) re-ranker over the fused candidates |
-| `src/embed.py` | OpenAI `text-embedding-3-large @ 1024` for chunks + questions (cached) |
-| `data/` | Pre-built: `chunks/` (enriched), `embeddings/` (vectors), `transcripts/` (timed cues) |
-
----
-
-## Run it
-
-```bash
-cd Moment_RAG
-python -m venv .venv && source .venv/bin/activate     # optional
-pip install -r requirements.txt
-cp .env.example .env        # then add your OPENAI_API_KEY
-
-uvicorn app:app --reload --port 8000
-# open http://localhost:8000
-```
-
-The index is **pre-built and committed** (`data/embeddings/`), so first run only needs your
-OpenAI key. On the first query, fastembed downloads two small CPU models (BM25 + the cross-encoder
-re-ranker) — a one-time ~1 min. Each query then makes a few OpenAI calls (embed sub-queries,
-decompose, self-query, and the streamed answer).
-
-| Env var | Default | Purpose |
-|---|---|---|
-| `OPENAI_API_KEY` | — | required |
-| `SYNTH_MODEL` | `gpt-4o` | model for the user-facing cited answer (falls back to `LLM_MODEL`) |
-| `LLM_MODEL` | `gpt-4o-mini` | cheap internal calls (decompose, self-query) |
-
----
-
-## Extend it
-
-- **Rebuild the index** (after changing chunking, etc.): `python build_index.py` — re-embeds the
-  committed chunks (cheap; no Whisper, no enrichment).
-- **Add an episode:** append it to `videos.yaml` (`id`, `url`, `title`, `guest`, `content_labels`),
-  drop a timestamped transcript into `data/transcripts/<id>.json` (`{"video_id", "cues":[{speaker,start_ms,end_ms,text}]}`),
-  then run the chunk → enrich → embed steps in `src/ingest/` and `build_index.py`.
-
----
-
-## Try these
-
-- *Across these guests, where is the sharpest disagreement about where AI's durable moat comes from?*
-- *Synthesize a 2026 playbook for a PM: what to start, stop, and double down on?*
-- *How do the growth and product-craft views actually conflict?*
-
-Each returns a cited answer; click a `[n]` to watch the exact moment.
+- **No captions found:** choose a public YouTube video with captions enabled.
+- **No sources in an answer:** confirm at least one video completed all ingestion
+  stages in the current server session.
+- **The video list disappeared:** the server restarted; add the videos again.
+- **First request is slow:** wait for local FastEmbed model downloads to finish.
+- **OpenAI authentication error:** verify `OPENAI_API_KEY` in `.env`, then restart
+  the server.
